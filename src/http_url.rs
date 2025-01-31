@@ -2,7 +2,7 @@ use std::fmt::{self, Write};
 
 use crate::Error;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Port {
     ImplicitHttp,
     ImplicitHttps,
@@ -27,7 +27,7 @@ impl Port {
 /// ```text
 /// scheme "://" host [ ":" port ] path [ "?" query ] [ "#" fragment ]
 /// ```
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) struct HttpUrl {
     /// If scheme is "https", true, if "http", false.
     pub(crate) https: bool,
@@ -93,9 +93,6 @@ impl HttpUrl {
                     path_and_query = Some(resource);
                     resource = String::new();
                 }
-                #[cfg(not(feature = "urlencoding"))]
-                UrlParseStatus::PathAndQuery | UrlParseStatus::Fragment => resource.push(c),
-                #[cfg(feature = "urlencoding")]
                 UrlParseStatus::PathAndQuery | UrlParseStatus::Fragment => match c {
                     // All URL-'safe' characters, plus URL 'special
                     // characters' like &, #, =, / ,?
@@ -201,7 +198,6 @@ impl HttpUrl {
 
 // https://github.com/kornelski/rust_urlencoding/blob/a4df8027ab34a86a63f1be727965cf101556403f/src/enc.rs#L130-L136
 // Converts a UTF-8 byte to a single hexadecimal character
-#[cfg(feature = "urlencoding")]
 fn to_hex_digit(digit: u8) -> char {
     match digit {
         0..=9 => (b'0' + digit) as char,

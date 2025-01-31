@@ -1,70 +1,48 @@
 [package]
 name = "minreq"
-version = "2.13.3-alpha"
-authors = ["Jens Pitkanen <jens@neon.moe>"]
-description = "Simple, minimal-dependency HTTP client"
-documentation = "https://docs.rs/minreq"
-homepage = "https://github.com/neonmoe/minreq"
-repository = "https://github.com/neonmoe/minreq"
-readme = "README.md"
-keywords = ["http", "https", "client", "request", "json"]
-categories = ["web-programming::http-client"]
-license = "ISC"
-edition = "2018"
+version = "2.13.1"
+edition = "2024"
 
-[badges]
-travis-ci = { repository = "neonmoe/minreq" }
-maintenance = { status = "passively-maintained" }
+[lib]
+name = "minreq"
+path = "src/lib.rs"
 
 [dependencies]
-# For the urlencoding feature:
-urlencoding = { version = "2.1.0", optional = true }
-# For the punycode feature:
-punycode = { version = "0.4.1", optional = true }
-# For the json-using-serde feature:
-serde = { version = "1.0.101", optional = true }
-serde_json = { version = "1.0.0", optional = true }
-# For the proxy feature:
-base64 = { version = "0.12", optional = true }
-# For the https features:
-rustls = { version = "0.21.1", optional = true }
-rustls-native-certs = { version = "0.6.1", optional = true }
-once_cell = { version = "1.14.0", optional = true }
-webpki-roots = { version = "0.25.2", optional = true }
-rustls-webpki = { version = "0.101.0", optional = true }
-openssl = { version = "0.10.29", optional = true }
+urlencoding = { version = "2.1.3" }
+base64 = { version = "0.22.1" , optional = true}
+once_cell = { version = "1.14.0" }
+webpki-roots = "0.26.7"
 log = { version = "0.4.0" }
-openssl-probe = { version = "0.1", optional = true }
-native-tls = { version = "0.2", optional = true }
+rustls-webpki = "0.102.8"
+tokio = { version = "^1", default-features = false, features = ["rt", "net", "io-util", "fs"] }
+anyhow = "1.0.95"
+tokio-rustls = { version = "0.26.0", default-features = false, features = ["ring"] }
+rustls = { version = "^0.23", default-features = false, features = ["ring", "std"]}
+futures = "0.3.31"
+[[example]]
+name = "download"
+path = "./src/download.rs"
 
 [dev-dependencies]
-tiny_http = "0.12"
-chrono = "0.4.0"
-
-[package.metadata.docs.rs]
-features = ["json-using-serde", "proxy", "https", "punycode"]
+indicatif = "0.17.11"
+env_logger = "0.11.6"
+chrono = "0.4.39"
 
 [features]
-https = ["https-rustls"]
-https-rustls = ["rustls", "once_cell", "webpki-roots", "rustls-webpki"]
-https-rustls-probe = ["rustls", "once_cell", "rustls-native-certs"]
-https-bundled = ["openssl/vendored"]
-https-bundled-probe = ["https-bundled", "openssl-probe"]
-https-native = ["native-tls"]
-json-using-serde = ["serde", "serde_json"]
+default = []
 proxy = ["base64"]
+https = []
 
-[[example]]
-name = "hello"
+[profile.release]
+opt-level = "z"
+strip = true
+lto = "fat"
+panic = "abort"
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
 
-[[example]]
-name = "iterator"
-
-[[example]]
-name = "json"
-required-features = ["json-using-serde"]
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(have_min_max_version)'] }
-
-# vim: ft=conf
+[profile.dev]
+debug = true
+opt-level = "z"
+panic = "abort"

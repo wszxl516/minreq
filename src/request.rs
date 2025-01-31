@@ -1,12 +1,12 @@
 use crate::connection::Connection;
 use crate::http_url::{HttpUrl, Port};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "proxy")]
 use crate::proxy::Proxy;
 use crate::{Error, Response, ResponseLazy};
 use std::collections::HashMap;
-use std::fmt;
 use std::fmt::Write;
-
+use std::fmt;
 /// A URL type for requests.
 pub type URL = String;
 
@@ -75,12 +75,12 @@ pub struct Request {
     pub(crate) method: Method,
     url: URL,
     params: String,
-    headers: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     body: Option<Vec<u8>>,
-    pub(crate) timeout: Option<u64>,
     pub(crate) max_headers_size: Option<usize>,
     pub(crate) max_status_line_len: Option<usize>,
     max_redirects: usize,
+    pub redirect: bool,
     #[cfg(feature = "proxy")]
     pub(crate) proxy: Option<Proxy>,
 }
@@ -98,16 +98,19 @@ impl Request {
     /// encoded. Any URL special characters (e.g. &, #, =) are not encoded
     /// as they are assumed to be meaningful parameters etc.
     pub fn new<T: Into<URL>>(method: Method, url: T) -> Request {
+        let mut headers= HashMap::new();
+        headers.insert("user-agent".to_owned(), "minreq/1.0".to_owned());
+        headers.insert("accept".to_owned(), "*/*".to_owned());
         Request {
             method,
             url: url.into(),
             params: String::new(),
-            headers: HashMap::new(),
+            headers,
             body: None,
-            timeout: None,
             max_headers_size: None,
             max_status_line_len: None,
             max_redirects: 100,
+            redirect: false,
             #[cfg(feature = "proxy")]
             proxy: None,
         }
@@ -132,7 +135,10 @@ impl Request {
         self.headers.insert(key.into(), value.into());
         self
     }
-
+    pub fn with_redirect(mut self, follow: bool) -> Request {
+        self.redirect = follow;
+        self
+    }
     /// Sets the request body.
     pub fn with_body<T: Into<Vec<u8>>>(mut self, body: T) -> Request {
         let body = body.into();
@@ -151,10 +157,8 @@ impl Request {
     /// If `urlencoding` is enabled, the key and value are both encoded.
     pub fn with_param<T: Into<String>, U: Into<String>>(mut self, key: T, value: U) -> Request {
         let key = key.into();
-        #[cfg(feature = "urlencoding")]
         let key = urlencoding::encode(&key);
         let value = value.into();
-        #[cfg(feature = "urlencoding")]
         let value = urlencoding::encode(&value);
 
         if !self.params.is_empty() {
@@ -166,31 +170,6 @@ impl Request {
         self
     }
 
-    /// Converts given argument to JSON and sets it as body.
-    ///
-    /// # Errors
-    ///
-    /// Returns
-    /// [`SerdeJsonError`](enum.Error.html#variant.SerdeJsonError) if
-    /// Serde runs into a problem when converting `body` into a
-    /// string.
-    #[cfg(feature = "json-using-serde")]
-    pub fn with_json<T: serde::ser::Serialize>(mut self, body: &T) -> Result<Request, Error> {
-        self.headers.insert(
-            "Content-Type".to_string(),
-            "application/json; charset=UTF-8".to_string(),
-        );
-        match serde_json::to_string(&body) {
-            Ok(json) => Ok(self.with_body(json)),
-            Err(err) => Err(Error::SerdeJsonError(err)),
-        }
-    }
-
-    /// Sets the request timeout in seconds.
-    pub fn with_timeout(mut self, timeout: u64) -> Request {
-        self.timeout = Some(timeout);
-        self
-    }
 
     /// Sets the max redirects we follow until giving up. 100 by
     /// default.
@@ -263,23 +242,20 @@ impl Request {
     /// [`minreq::Error`](enum.Error.html) except
     /// [`SerdeJsonError`](enum.Error.html#variant.SerdeJsonError) and
     /// [`InvalidUtf8InBody`](enum.Error.html#variant.InvalidUtf8InBody).
-    pub fn send(self) -> Result<Response, Error> {
+    pub async fn send(self) -> Result<Response, Error> {
         let parsed_request = ParsedRequest::new(self)?;
+        let is_head = parsed_request.config.method == Method::Head;
         if parsed_request.url.https {
-            #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
-            {
-                let is_head = parsed_request.config.method == Method::Head;
-                let response = Connection::new(parsed_request).send_https()?;
-                Response::create(response, is_head)
-            }
-            #[cfg(not(any(feature = "rustls", feature = "openssl", feature = "native-tls")))]
-            {
-                Err(Error::HttpsFeatureNotEnabled)
-            }
+            #[cfg(feature = "https")]
+            let response = Connection::new(parsed_request).send_https().await?;
+            #[cfg(feature = "https")]
+            return Response::create(response, is_head).await;
+            #[cfg(not(feature = "https"))]
+            return Err(Error::HttpsFeatureNotEnabled);
+            
         } else {
-            let is_head = parsed_request.config.method == Method::Head;
-            let response = Connection::new(parsed_request).send()?;
-            Response::create(response, is_head)
+            let response = Connection::new(parsed_request).send().await?;
+            Response::create(response, is_head).await
         }
     }
 
@@ -288,23 +264,34 @@ impl Request {
     /// # Errors
     ///
     /// See [`send`](struct.Request.html#method.send).
-    pub fn send_lazy(self) -> Result<ResponseLazy, Error> {
+    pub async fn send_lazy(self) -> Result<ResponseLazy, Error> {
         let parsed_request = ParsedRequest::new(self)?;
         if parsed_request.url.https {
-            #[cfg(any(feature = "rustls", feature = "openssl", feature = "native-tls"))]
-            {
-                Connection::new(parsed_request).send_https()
-            }
-            #[cfg(not(any(feature = "rustls", feature = "openssl", feature = "native-tls")))]
-            {
-                Err(Error::HttpsFeatureNotEnabled)
-            }
+            #[cfg(feature = "https")]
+            return Connection::new(parsed_request).send_https().await;
+            #[cfg(not(feature = "https"))]
+            return Err(Error::HttpsFeatureNotEnabled);
         } else {
-            Connection::new(parsed_request).send()
+            Connection::new(parsed_request).send().await
         }
+    }
+    pub async fn send_with_stream<W, F>(self, stream: &mut W, progress_fn: F) -> Result<Response, Error>
+    where F: Fn(u64, u64), W: tokio::io::AsyncWrite + std::marker::Unpin,
+    {
+        let mut response = self.send_lazy().await?;
+        let default_content_lenth = String::from("0");
+        let content_lenth = response.headers.get("content-length").unwrap_or(&default_content_lenth);
+        let content_lenth = content_lenth.trim();
+        let content_lenth = u64::from_str_radix(content_lenth, 10)
+        .map_err(|_|Error::MalformedContentLength)?;
+        let total_download = copy_with_progress(&mut response.stream, stream, content_lenth,progress_fn).await?;
+        let mut response = Response::create(response, true).await?;
+        response.download_size = total_download;
+        Ok(response)
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ParsedRequest {
     pub(crate) url: HttpUrl,
     pub(crate) redirects: Vec<HttpUrl>,
@@ -395,7 +382,6 @@ impl ParsedRequest {
         for (k, v) in &self.config.headers {
             write!(http, "{}: {}\r\n", k, v).unwrap();
         }
-
         if self.config.method == Method::Post
             || self.config.method == Method::Put
             || self.config.method == Method::Patch
@@ -416,7 +402,6 @@ impl ParsedRequest {
                 http += "Content-Length: 0\r\n";
             }
         }
-
         http += "\r\n";
         http
     }
@@ -444,11 +429,13 @@ impl ParsedRequest {
                     "was redirected to an absolute url with an invalid protocol",
                 ))
             })?;
+            log::trace!("Redirect to absolute url: {:?}", url);
             std::mem::swap(&mut url, &mut self.url);
             self.redirects.push(url);
         } else {
             // The url does not have the protocol part, assuming it's
             // a relative resource.
+            log::trace!("Redirect to relatively url: {:?}", url);
             let mut absolute_url = String::new();
             self.url.write_base_url_to(&mut absolute_url).unwrap();
             absolute_url.push_str(url);
@@ -524,7 +511,45 @@ pub fn trace<T: Into<URL>>(url: T) -> Request {
 pub fn patch<T: Into<URL>>(url: T) -> Request {
     Request::new(Method::Patch, url)
 }
+const DOWNLOAD_BUFFER_SIZEE: usize = 4096;
+async fn copy_with_progress<R: ?Sized , W: ?Sized>(reader: &mut R, writer: &mut W, total: u64, f: impl Fn(u64, u64)) -> Result<u64, std::io::Error>
+where
+    R: tokio::io::AsyncRead + std::marker::Unpin,
+    W: tokio::io::AsyncWrite + std::marker::Unpin,
+{
+    let mut buffer = vec![0u8; DOWNLOAD_BUFFER_SIZEE];
+    let mut total_len = 0u64;
+    while let Ok(len) =  reader.read(&mut buffer).await{
+        total_len += len as u64;
+        f(total, total_len);
+        if len == 0 || total_len == total || len < DOWNLOAD_BUFFER_SIZEE{
+            break;
+        }
+        writer.write_all(&buffer[0..len]).await?;
+    }
+    Ok(total_len)
+}
 
+/// write response to stream
+// pub async fn download<T, W, F>(url: T, stream: &mut W, progress_fn: F) -> Result<u64, Error> 
+// where F: Fn(u64, u64), 
+// W: tokio::io::AsyncWrite + std::marker::Unpin,
+// T: Into<URL>
+// {
+//     let req = Request::new(Method::Get, url);
+//     let mut lazy_res = req.send_lazy().await?;
+//     let default_content_lenth = String::from("0");
+//     let content_lenth = lazy_res.headers.get("content-length").unwrap_or(&default_content_lenth);
+//     let content_lenth = content_lenth.trim();
+//     let content_lenth = u64::from_str_radix(content_lenth, 10)
+//     .map_err(|_|Error::MalformedContentLength)?;
+//     if lazy_res.status_code >=200 && lazy_res.status_code < 300{
+//         Ok(copy_with_progress(&mut lazy_res.stream, stream, content_lenth,progress_fn).await?)
+//     }
+//     else {
+//         Err(Error::Other("Http request not succeed, status !"))
+//     }
+// }
 #[cfg(test)]
 mod parsing_tests {
 
@@ -570,7 +595,7 @@ mod parsing_tests {
     }
 }
 
-#[cfg(all(test, feature = "urlencoding"))]
+#[cfg(all(test))]
 mod encoding_tests {
     use super::{get, ParsedRequest};
 

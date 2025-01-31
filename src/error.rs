@@ -4,14 +4,9 @@ use std::{error, fmt, io, str};
 #[derive(Debug)]
 // TODO: Make non-exhaustive for 3.0?
 pub enum Error {
-    #[cfg(feature = "json-using-serde")]
-    /// Ran into a Serde error.
-    SerdeJsonError(serde_json::Error),
     /// The response body contains invalid UTF-8, so the `as_str()`
     /// conversion failed.
     InvalidUtf8InBody(str::Utf8Error),
-
-    #[cfg(feature = "rustls")]
     /// Ran into a rustls error while creating the connection.
     RustlsCreateConnection(rustls::Error),
     /// Ran into an IO problem while loading the response.
@@ -85,12 +80,8 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Error::*;
         match self {
-            #[cfg(feature = "json-using-serde")]
-            SerdeJsonError(err) => write!(f, "{}", err),
             IoError(err) => write!(f, "{}", err),
             InvalidUtf8InBody(err) => write!(f, "{}", err),
-
-            #[cfg(feature = "rustls")]
             RustlsCreateConnection(err) => write!(f, "error creating rustls connection: {}", err),
             MalformedChunkLength => write!(f, "non-usize chunk length with transfer-encoding: chunked"),
             MalformedChunkEnd => write!(f, "chunk did not end after reading the expected amount of bytes"),
@@ -121,11 +112,8 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         use Error::*;
         match self {
-            #[cfg(feature = "json-using-serde")]
-            SerdeJsonError(err) => Some(err),
             IoError(err) => Some(err),
             InvalidUtf8InBody(err) => Some(err),
-            #[cfg(feature = "rustls")]
             RustlsCreateConnection(err) => Some(err),
             _ => None,
         }

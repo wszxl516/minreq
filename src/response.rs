@@ -1,10 +1,8 @@
-use crate::{connection::HttpStream, Error};
+use crate::{Error, connection::HttpStream};
 use std::collections::HashMap;
-use std::io::{self, BufReader, Bytes, Read};
-use std::str;
-
+use std::{fmt::Display, str};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 const BACKING_READ_BUFFER_LENGTH: usize = 16 * 1024;
-const MAX_CONTENT_LENGTH: usize = 16 * 1024;
 
 /// An HTTP response.
 ///
@@ -32,18 +30,37 @@ pub struct Response {
     /// <http://example.com?foo=bar> would be corrected to
     /// <http://example.com/?foo=bar>).
     pub url: String,
-
+    pub download_size: u64,
     body: Vec<u8>,
 }
-
+impl Display for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len =  self.body_len();
+        let len = match len {
+            0 => self.download_size,
+            _ => len
+        };
+        writeln!(
+            f,
+            "Response {{ Status: {} {}, body len: {} }}",
+            self.status_code,
+            self.reason_phrase,
+            len
+        )
+    }
+}
 impl Response {
-    pub(crate) fn create(mut parent: ResponseLazy, is_head: bool) -> Result<Response, Error> {
+    pub(crate) async fn create(mut parent: ResponseLazy, is_head: bool) -> Result<Response, Error> {
         let mut body = Vec::new();
         if !is_head && parent.status_code != 204 && parent.status_code != 304 {
-            for byte in &mut parent {
-                let (byte, length) = byte?;
-                body.reserve(length);
-                body.push(byte);
+            loop {
+                let d = parent.next().await;
+                match d {
+                    Some(byte) => {
+                        body.push(byte);
+                    }
+                    None => break,
+                }
             }
         }
 
@@ -61,6 +78,7 @@ impl Response {
             headers,
             url,
             body,
+            download_size: 0
         })
     }
 
@@ -127,44 +145,10 @@ impl Response {
     pub fn into_bytes(self) -> Vec<u8> {
         self.body
     }
-
-    /// Converts JSON body to a `struct` using Serde.
-    ///
-    /// # Errors
-    ///
-    /// Returns
-    /// [`SerdeJsonError`](enum.Error.html#variant.SerdeJsonError) if
-    /// Serde runs into a problem, or
-    /// [`InvalidUtf8InBody`](enum.Error.html#variant.InvalidUtf8InBody)
-    /// if the body is not UTF-8.
-    ///
-    /// # Example
-    /// In case compiler cannot figure out return type you might need to declare it explicitly:
-    ///
-    /// ```no_run
-    /// use serde_json::Value;
-    ///
-    /// # fn main() -> Result<(), minreq::Error> {
-    /// # let url_to_json_resource = "http://example.org/resource.json";
-    /// // Value could be any type that implements Deserialize!
-    /// let user = minreq::get(url_to_json_resource).send()?.json::<Value>()?;
-    /// println!("User name is '{}'", user["name"]);
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "json-using-serde")]
-    pub fn json<'a, T>(&'a self) -> Result<T, Error>
-    where
-        T: serde::de::Deserialize<'a>,
-    {
-        let str = match self.as_str() {
-            Ok(str) => str,
-            Err(_) => return Err(Error::InvalidUtf8InResponse),
-        };
-        match serde_json::from_str(str) {
-            Ok(json) => Ok(json),
-            Err(err) => Err(Error::SerdeJsonError(err)),
-        }
+    pub fn body_len(&self) -> u64{
+        let default_content_lenth = String::from("0");
+        let content_lenth = self.headers.get("content-length").unwrap_or(&default_content_lenth);
+        u64::from_str_radix(content_lenth.trim(), 10).unwrap_or(0)
     }
 }
 
@@ -218,27 +202,27 @@ pub struct ResponseLazy {
     /// <http://example.com/?foo=bar>).
     pub url: String,
 
-    stream: HttpStreamBytes,
+    pub stream: HttpStreamBytes,
     state: HttpStreamState,
     max_trailing_headers_size: Option<usize>,
 }
 
-type HttpStreamBytes = Bytes<BufReader<HttpStream>>;
+pub type HttpStreamBytes = BufReader<HttpStream>;
 
 impl ResponseLazy {
-    pub(crate) fn from_stream(
+    pub(crate) async fn from_stream(
         stream: HttpStream,
         max_headers_size: Option<usize>,
         max_status_line_len: Option<usize>,
     ) -> Result<ResponseLazy, Error> {
-        let mut stream = BufReader::with_capacity(BACKING_READ_BUFFER_LENGTH, stream).bytes();
+        let mut stream = BufReader::with_capacity(BACKING_READ_BUFFER_LENGTH, stream);
         let ResponseMetadata {
             status_code,
             reason_phrase,
             headers,
             state,
             max_trailing_headers_size,
-        } = read_metadata(&mut stream, max_headers_size, max_status_line_len)?;
+        } = read_metadata(&mut stream, max_headers_size, max_status_line_len).await?;
 
         Ok(ResponseLazy {
             status_code,
@@ -250,16 +234,13 @@ impl ResponseLazy {
             max_trailing_headers_size,
         })
     }
-}
-
-impl Iterator for ResponseLazy {
-    type Item = Result<(u8, usize), Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    async fn next(&mut self) -> Option<u8> {
         use HttpStreamState::*;
         match self.state {
-            EndOnClose => read_until_closed(&mut self.stream),
-            ContentLength(ref mut length) => read_with_content_length(&mut self.stream, length),
+            EndOnClose => read_until_closed(&mut self.stream).await,
+            ContentLength(ref mut length) => {
+                read_with_content_length(&mut self.stream, length).await
+            }
             Chunked(ref mut expecting_chunks, ref mut length, ref mut content_length) => {
                 read_chunked(
                     &mut self.stream,
@@ -269,72 +250,45 @@ impl Iterator for ResponseLazy {
                     content_length,
                     self.max_trailing_headers_size,
                 )
+                .await
             }
         }
     }
 }
 
-impl Read for ResponseLazy {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut index = 0;
-        for res in self {
-            // there is no use for the estimated length in the read implementation
-            // so it is ignored.
-            let (byte, _) = res.map_err(|e| match e {
-                Error::IoError(e) => e,
-                _ => io::Error::new(io::ErrorKind::Other, e),
-            })?;
-
-            buf[index] = byte;
-            index += 1;
-
-            // if the buffer is full, it should stop reading
-            if index >= buf.len() {
-                break;
-            }
+async fn read_until_closed(bytes: &mut HttpStreamBytes) -> Option<u8> {
+    let mut buf = [0u8];
+    if let Ok(len) = bytes.read(&mut buf).await {
+        if len != 0 {
+            return Some(buf[0]);
         }
-
-        // index of the next byte is the number of bytes thats have been read
-        Ok(index)
     }
+    None
 }
 
-fn read_until_closed(bytes: &mut HttpStreamBytes) -> Option<<ResponseLazy as Iterator>::Item> {
-    if let Some(byte) = bytes.next() {
-        match byte {
-            Ok(byte) => Some(Ok((byte, 1))),
-            Err(err) => Some(Err(Error::IoError(err))),
-        }
-    } else {
-        None
-    }
-}
-
-fn read_with_content_length(
+async fn read_with_content_length(
     bytes: &mut HttpStreamBytes,
     content_length: &mut usize,
-) -> Option<<ResponseLazy as Iterator>::Item> {
+) -> Option<u8> {
     if *content_length > 0 {
         *content_length -= 1;
-
-        if let Some(byte) = bytes.next() {
-            match byte {
-                // Cap Content-Length to 16KiB, to avoid out-of-memory issues.
-                Ok(byte) => return Some(Ok((byte, (*content_length).min(MAX_CONTENT_LENGTH) + 1))),
-                Err(err) => return Some(Err(Error::IoError(err))),
+        let mut buf = [0u8];
+        if let Ok(len) = bytes.read(&mut buf).await {
+            if len != 0 {
+                return Some(buf[0]);
             }
         }
     }
     None
 }
 
-fn read_trailers(
+async fn read_trailers(
     bytes: &mut HttpStreamBytes,
     headers: &mut HashMap<String, String>,
     mut max_headers_size: Option<usize>,
 ) -> Result<(), Error> {
     loop {
-        let trailer_line = read_line(bytes, max_headers_size, Error::HeadersOverflow)?;
+        let trailer_line = read_line(bytes).await?;
         if let Some(ref mut max_headers_size) = max_headers_size {
             *max_headers_size -= trailer_line.len() + 2;
         }
@@ -347,14 +301,14 @@ fn read_trailers(
     Ok(())
 }
 
-fn read_chunked(
+async fn read_chunked(
     bytes: &mut HttpStreamBytes,
     headers: &mut HashMap<String, String>,
     expecting_more_chunks: &mut bool,
     chunk_length: &mut usize,
     content_length: &mut usize,
     max_trailing_headers_size: Option<usize>,
-) -> Option<<ResponseLazy as Iterator>::Item> {
+) -> Option<u8> {
     if !*expecting_more_chunks && *chunk_length == 0 {
         return None;
     }
@@ -365,9 +319,9 @@ fn read_chunked(
         // extensions (which are ignored).
 
         // Get the size of the next chunk
-        let length_line = match read_line(bytes, Some(1024), Error::MalformedChunkLength) {
+        let length_line = match read_line(bytes).await {
             Ok(line) => line,
-            Err(err) => return Some(Err(err)),
+            Err(_) => return None,
         };
 
         // Note: the trim() and check for empty lines shouldn't be
@@ -383,13 +337,13 @@ fn read_chunked(
             };
             match usize::from_str_radix(length, 16) {
                 Ok(length) => length,
-                Err(_) => return Some(Err(Error::MalformedChunkLength)),
+                Err(_) => return None,
             }
         };
 
         if incoming_length == 0 {
-            if let Err(err) = read_trailers(bytes, headers, max_trailing_headers_size) {
-                return Some(Err(err));
+            if let Err(_) = read_trailers(bytes, headers, max_trailing_headers_size).await {
+                return None;
             }
 
             *expecting_more_chunks = false;
@@ -403,25 +357,25 @@ fn read_chunked(
 
     if *chunk_length > 0 {
         *chunk_length -= 1;
-        if let Some(byte) = bytes.next() {
-            match byte {
-                Ok(byte) => {
-                    // If we're at the end of the chunk...
-                    if *chunk_length == 0 {
-                        //...read the trailing \r\n of the chunk, and
-                        // possibly return an error instead.
+        let mut buf = [0u8];
+        if let Ok(len) = bytes.read(&mut buf).await {
+            if len == 1 {
+                // If we're at the end of the chunk...
+                if *chunk_length == 0 {
+                    //...read the trailing \r\n of the chunk, and
+                    // possibly return an error instead.
 
-                        // TODO: Maybe this could be written in a way
-                        // that doesn't discard the last ok byte if
-                        // the \r\n reading fails?
-                        if let Err(err) = read_line(bytes, Some(2), Error::MalformedChunkEnd) {
-                            return Some(Err(err));
-                        }
+                    // TODO: Maybe this could be written in a way
+                    // that doesn't discard the last ok byte if
+                    // the \r\n reading fails?
+                    if let Err(_) = read_line(bytes).await {
+                        return None;
                     }
-
-                    return Some(Ok((byte, (*chunk_length).min(MAX_CONTENT_LENGTH) + 1)));
                 }
-                Err(err) => return Some(Err(Error::IoError(err))),
+
+                return Some(buf[0]);
+            } else {
+                return None;
             }
         }
     }
@@ -456,26 +410,27 @@ struct ResponseMetadata {
     max_trailing_headers_size: Option<usize>,
 }
 
-fn read_metadata(
+async fn read_metadata(
     stream: &mut HttpStreamBytes,
     mut max_headers_size: Option<usize>,
-    max_status_line_len: Option<usize>,
+    _max_status_line_len: Option<usize>,
 ) -> Result<ResponseMetadata, Error> {
-    let line = read_line(stream, max_status_line_len, Error::StatusLineOverflow)?;
+    let line = read_line(stream).await?;
     let (status_code, reason_phrase) = parse_status_line(&line);
 
     let mut headers = HashMap::new();
     loop {
-        let line = read_line(stream, max_headers_size, Error::HeadersOverflow)?;
-        if line.is_empty() {
+        let line = read_line(stream).await?;
+        if line.is_empty() || line == "\r\n" {
             // Body starts here
             break;
         }
+        let line = line.trim().to_string();
         if let Some(ref mut max_headers_size) = max_headers_size {
             *max_headers_size -= line.len() + 2;
         }
         if let Some(header) = parse_header(line) {
-            headers.insert(header.0, header.1);
+            headers.insert(header.0.to_lowercase(), header.1);
         }
     }
 
@@ -515,33 +470,16 @@ fn read_metadata(
     })
 }
 
-fn read_line(
-    stream: &mut HttpStreamBytes,
-    max_len: Option<usize>,
-    overflow_error: Error,
-) -> Result<String, Error> {
-    let mut bytes = Vec::with_capacity(32);
-    for byte in stream {
-        match byte {
-            Ok(byte) => {
-                if let Some(max_len) = max_len {
-                    if bytes.len() >= max_len {
-                        return Err(overflow_error);
-                    }
-                }
-                if byte == b'\n' {
-                    if let Some(b'\r') = bytes.last() {
-                        bytes.pop();
-                    }
-                    break;
-                } else {
-                    bytes.push(byte);
-                }
-            }
-            Err(err) => return Err(Error::IoError(err)),
-        }
+pub async fn read_line<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<String, Error> {
+    let mut buffer = String::new();
+    match reader
+        .read_line(&mut buffer)
+        .await
+        .map_err(|_| Error::HeadersOverflow)
+    {
+        Ok(_) => Ok(buffer),
+        Err(_) => Err(Error::HeadersOverflow),
     }
-    String::from_utf8(bytes).map_err(|_error| Error::InvalidUtf8InResponse)
 }
 
 fn parse_status_line(line: &str) -> (i32, String) {
@@ -565,7 +503,7 @@ fn parse_status_line(line: &str) -> (i32, String) {
     }
 
     if let Ok(status_code) = status_code.parse::<i32>() {
-        return (status_code, reason_phrase);
+        return (status_code, reason_phrase.trim().to_string());
     }
 
     (503, "Server did not provide a status line".to_string())

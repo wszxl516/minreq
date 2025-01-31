@@ -1,3 +1,5 @@
+use base64::Engine;
+
 use crate::error::Error;
 use crate::ParsedRequest;
 
@@ -89,9 +91,9 @@ impl Proxy {
             match self.kind {
                 ProxyKind::Basic => {
                     let creds = if let Some(password) = &self.password {
-                        base64::encode(format!("{}:{}", user, password))
+                        base64::prelude::BASE64_STANDARD.encode(format!("{}:{}", user, password))
                     } else {
-                        base64::encode(user)
+                        base64::prelude::BASE64_STANDARD.encode(user)
                     };
                     format!("Proxy-Authorization: Basic {}\r\n", creds)
                 }
