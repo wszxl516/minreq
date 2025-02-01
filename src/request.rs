@@ -533,7 +533,8 @@ where
 {
     let mut buffer = vec![0u8; DOWNLOAD_BUFFER_SIZEE];
     let mut total_len = 0u64;
-    while let Ok(len) = reader.read(&mut buffer).await {
+    while let Ok(len) = reader.read_exact(&mut buffer).await {
+        writer.write_all(&buffer[0..len]).await?;
         total_len += len as u64;
         f(total, total_len);
         writer.write_all(&buffer[0..len]).await?;
