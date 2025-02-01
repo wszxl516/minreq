@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     let response = rt.block_on(
       async move{
         let mut fd = tokio::fs::File::options().create(true).write(true).open("index.html").await.unwrap();
-        minreq::get("http://127.0.0.1:5000/target/release/control-gui")
+        minreq::get("https://raw.githubusercontent.com/neonmoe/minreq/refs/heads/master/README.md")
             .with_redirect(false)
             .send_with_stream(&mut fd, |t,c|println!("{}/{}", c, t))
             .await

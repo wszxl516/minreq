@@ -1,12 +1,12 @@
 use crate::connection::Connection;
 use crate::http_url::{HttpUrl, Port};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "proxy")]
 use crate::proxy::Proxy;
 use crate::{Error, Response, ResponseLazy};
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::fmt;
+use std::fmt::Write;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// A URL type for requests.
 pub type URL = String;
 
@@ -98,7 +98,7 @@ impl Request {
     /// encoded. Any URL special characters (e.g. &, #, =) are not encoded
     /// as they are assumed to be meaningful parameters etc.
     pub fn new<T: Into<URL>>(method: Method, url: T) -> Request {
-        let mut headers= HashMap::new();
+        let mut headers = HashMap::new();
         headers.insert("user-agent".to_owned(), "minreq/1.0".to_owned());
         headers.insert("accept".to_owned(), "*/*".to_owned());
         Request {
@@ -169,7 +169,6 @@ impl Request {
         self.params.push_str(&value);
         self
     }
-
 
     /// Sets the max redirects we follow until giving up. 100 by
     /// default.
@@ -252,7 +251,6 @@ impl Request {
             return Response::create(response, is_head).await;
             #[cfg(not(feature = "https"))]
             return Err(Error::HttpsFeatureNotEnabled);
-            
         } else {
             let response = Connection::new(parsed_request).send().await?;
             Response::create(response, is_head).await
@@ -275,16 +273,26 @@ impl Request {
             Connection::new(parsed_request).send().await
         }
     }
-    pub async fn send_with_stream<W, F>(self, stream: &mut W, progress_fn: F) -> Result<Response, Error>
-    where F: Fn(u64, u64), W: tokio::io::AsyncWrite + std::marker::Unpin,
+    pub async fn send_with_stream<W, F>(
+        self,
+        stream: &mut W,
+        progress_fn: F,
+    ) -> Result<Response, Error>
+    where
+        F: Fn(u64, u64),
+        W: tokio::io::AsyncWrite + std::marker::Unpin,
     {
         let mut response = self.send_lazy().await?;
         let default_content_lenth = String::from("0");
-        let content_lenth = response.headers.get("content-length").unwrap_or(&default_content_lenth);
+        let content_lenth = response
+            .headers
+            .get("content-length")
+            .unwrap_or(&default_content_lenth);
         let content_lenth = content_lenth.trim();
-        let content_lenth = u64::from_str_radix(content_lenth, 10)
-        .map_err(|_|Error::MalformedContentLength)?;
-        let total_download = copy_with_progress(&mut response.stream, stream, content_lenth,progress_fn).await?;
+        let content_lenth =
+            u64::from_str_radix(content_lenth, 10).map_err(|_| Error::MalformedContentLength)?;
+        let total_download =
+            copy_with_progress(&mut response.stream, stream, content_lenth, progress_fn).await?;
         let mut response = Response::create(response, true).await?;
         response.download_size = total_download;
         Ok(response)
@@ -511,51 +519,38 @@ pub fn trace<T: Into<URL>>(url: T) -> Request {
 pub fn patch<T: Into<URL>>(url: T) -> Request {
     Request::new(Method::Patch, url)
 }
+
 const DOWNLOAD_BUFFER_SIZEE: usize = 4096;
-async fn copy_with_progress<R: ?Sized , W: ?Sized>(reader: &mut R, writer: &mut W, total: u64, f: impl Fn(u64, u64)) -> Result<u64, std::io::Error>
+async fn copy_with_progress<R: ?Sized, W: ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    total: u64,
+    f: impl Fn(u64, u64),
+) -> Result<u64, std::io::Error>
 where
     R: tokio::io::AsyncRead + std::marker::Unpin,
     W: tokio::io::AsyncWrite + std::marker::Unpin,
 {
     let mut buffer = vec![0u8; DOWNLOAD_BUFFER_SIZEE];
     let mut total_len = 0u64;
-    while let Ok(len) =  reader.read(&mut buffer).await{
+    while let Ok(len) = reader.read(&mut buffer).await {
         total_len += len as u64;
         f(total, total_len);
-        if len == 0 || total_len == total || len < DOWNLOAD_BUFFER_SIZEE{
+        writer.write_all(&buffer[0..len]).await?;
+        if len == 0 || total_len == total || len < DOWNLOAD_BUFFER_SIZEE {
             break;
         }
-        writer.write_all(&buffer[0..len]).await?;
     }
     Ok(total_len)
 }
 
-/// write response to stream
-// pub async fn download<T, W, F>(url: T, stream: &mut W, progress_fn: F) -> Result<u64, Error> 
-// where F: Fn(u64, u64), 
-// W: tokio::io::AsyncWrite + std::marker::Unpin,
-// T: Into<URL>
-// {
-//     let req = Request::new(Method::Get, url);
-//     let mut lazy_res = req.send_lazy().await?;
-//     let default_content_lenth = String::from("0");
-//     let content_lenth = lazy_res.headers.get("content-length").unwrap_or(&default_content_lenth);
-//     let content_lenth = content_lenth.trim();
-//     let content_lenth = u64::from_str_radix(content_lenth, 10)
-//     .map_err(|_|Error::MalformedContentLength)?;
-//     if lazy_res.status_code >=200 && lazy_res.status_code < 300{
-//         Ok(copy_with_progress(&mut lazy_res.stream, stream, content_lenth,progress_fn).await?)
-//     }
-//     else {
-//         Err(Error::Other("Http request not succeed, status !"))
-//     }
-// }
+
 #[cfg(test)]
 mod parsing_tests {
 
     use std::collections::HashMap;
 
-    use super::{get, ParsedRequest};
+    use super::{ParsedRequest, get};
 
     #[test]
     fn test_headers() {
@@ -597,7 +592,7 @@ mod parsing_tests {
 
 #[cfg(all(test))]
 mod encoding_tests {
-    use super::{get, ParsedRequest};
+    use super::{ParsedRequest, get};
 
     #[test]
     fn test_with_param() {
