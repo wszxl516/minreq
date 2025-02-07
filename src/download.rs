@@ -1,4 +1,5 @@
 use indicatif::{ProgressBar, ProgressStyle};
+use minreq::SpendFuture;
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::new()
         .format(|buf, record| {
@@ -24,7 +25,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap()
         .progress_chars("#>-"));
     let p = pb.clone();
-    let response = rt.block_on(async move {
+    let fut = async move {
         let mut fd = tokio::fs::File::options()
             .create(true)
             .write(true)
@@ -38,8 +39,11 @@ fn main() -> anyhow::Result<()> {
                 p.set_position(c);
             })
             .await
-    });
+    };
+    let fut = std::pin::pin!(fut);
+    let f = SpendFuture::new(fut, None);
+    let response = rt.block_on(f);
     pb.finish_with_message("downloaded");
-    println!("{}", response?);
+    println!("download_size: {:?}, spend: {:?}", response.0?.download_size, response.1);
     Ok(())
 }
