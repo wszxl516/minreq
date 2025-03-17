@@ -1,8 +1,9 @@
 [package]
-name = "minreq"
+name = "minreq-async"
 version = "2.13.1"
 edition = "2024"
-
+description = "async version of https://github.com/neonmoe/minreq"
+license = "MIT"
 [lib]
 name = "minreq"
 path = "src/lib.rs"
